@@ -1,409 +1,343 @@
-import re
-import random
-import time
-from statistics import mode
+import re  # 正規表現操作を行うためのモジュール
+import random  # 乱数生成のためのモジュール
+import time  # 時間の計測や操作を行うためのモジュール
+from statistics import mode  # 最頻値（モード）を計算するためのモジュール
 
-from PIL import Image
-import numpy as np
-import pandas
-import torch
-import torch.nn as nn
-import torchvision
-from torchvision import transforms
-
+from PIL import Image  # Python Imaging Library（PIL）を使って画像を処理するためのモジュール
+import numpy as np  # 数値計算を効率的に行うためのライブラリ
+import pandas as pd  # データ操作や解析を行うためのライブラリ
+import torch  # PyTorch: ディープラーニングのためのフレームワーク
+import torch.nn as nn  # ニューラルネットワークモジュール
+import torchvision  # 画像処理用のPyTorchモジュール
+from torchvision import transforms  # 画像変換用のモジュール
 
 def set_seed(seed):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
+    random.seed(seed)  # randomモジュールのシードを設定して、乱数生成の再現性を確保します。
+    np.random.seed(seed)  # NumPyモジュールのシードを設定して、乱数生成の再現性を確保します。
+    torch.manual_seed(seed)  # PyTorchのCPU上での乱数生成のシードを設定して、再現性を確保します。
+    torch.cuda.manual_seed(seed)  # PyTorchのGPU上での乱数生成のシードを設定して、再現性を確保します。
+    torch.cuda.manual_seed_all(seed)  # 複数のGPUを使用する場合に、全てのGPUでの乱数生成のシードを設定します。
+    torch.backends.cudnn.deterministic = True  # CuDNNを使用する場合の再現性を確保するために、決定論的な挙動を有効にします。
+    torch.backends.cudnn.benchmark = False  # 再現性を確保するために、CuDNNのベンチマークモードを無効にします。
 
 def process_text(text):
-    # lowercase
-    text = text.lower()
+    text = text.lower()  # テキストを小文字に変換
 
-    # 数詞を数字に変換
-    num_word_to_digit = {
+    num_word_to_digit = {  # 数詞を数字に変換する辞書
         'zero': '0', 'one': '1', 'two': '2', 'three': '3', 'four': '4',
         'five': '5', 'six': '6', 'seven': '7', 'eight': '8', 'nine': '9',
         'ten': '10'
     }
-    for word, digit in num_word_to_digit.items():
+    for word, digit in num_word_to_digit.items():  # 数詞を数字に置き換える
         text = text.replace(word, digit)
 
-    # 小数点のピリオドを削除
-    text = re.sub(r'(?<!\d)\.(?!\d)', '', text)
+    text = re.sub(r'(?<!\d)\.(?!\d)', '', text)  # 小数点のピリオドを削除
 
-    # 冠詞の削除
-    text = re.sub(r'\b(a|an|the)\b', '', text)
+    text = re.sub(r'\b(a|an|the)\b', '', text)  # 冠詞を削除
 
-    # 短縮形のカンマの追加
-    contractions = {
+    contractions = {  # 短縮形を正規の形に戻す辞書
         "dont": "don't", "isnt": "isn't", "arent": "aren't", "wont": "won't",
         "cant": "can't", "wouldnt": "wouldn't", "couldnt": "couldn't"
     }
-    for contraction, correct in contractions.items():
+    for contraction, correct in contractions.items():  # 短縮形を変換
         text = text.replace(contraction, correct)
 
-    # 句読点をスペースに変換
-    text = re.sub(r"[^\w\s':]", ' ', text)
+    text = re.sub(r"[^\w\s':]", ' ', text)  # 句読点をスペースに変換
 
-    # 句読点をスペースに変換
-    text = re.sub(r'\s+,', ',', text)
+    text = re.sub(r'\s+,', ',', text)  # 不要なスペースを削除
 
-    # 連続するスペースを1つに変換
-    text = re.sub(r'\s+', ' ', text).strip()
+    text = re.sub(r'\s+', ' ', text).strip()  # 連続するスペースを1つに変換
 
-    return text
+    return text  # 処理したテキストを返す
 
-
-# 1. データローダーの作成
 class VQADataset(torch.utils.data.Dataset):
     def __init__(self, df_path, image_dir, transform=None, answer=True):
-        self.transform = transform  # 画像の前処理
-        self.image_dir = image_dir  # 画像ファイルのディレクトリ
-        self.df = pandas.read_json(df_path)  # 画像ファイルのパス，question, answerを持つDataFrame
-        self.answer = answer
+        self.transform = transform  # 画像の前処理を設定
+        self.image_dir = image_dir  # 画像ファイルのディレクトリを設定
+        self.df = pd.read_json(df_path)  # JSONファイルを読み込みDataFrameに変換
+        self.answer = answer  # 回答が含まれるかどうかのフラグを設定
 
-        # question / answerの辞書を作成
-        self.question2idx = {}
-        self.answer2idx = {}
-        self.idx2question = {}
-        self.idx2answer = {}
+        self.question2idx = {}  # 質問文の単語をインデックスに変換する辞書
+        self.answer2idx = {}  # 回答をインデックスに変換する辞書
+        self.idx2question = {}  # インデックスを質問文の単語に変換する辞書
+        self.idx2answer = {}  # インデックスを回答に変換する辞書
 
-        # 質問文に含まれる単語を辞書に追加
-        for question in self.df["question"]:
-            question = process_text(question)
-            words = question.split(" ")
-            for word in words:
+        for question in self.df["question"]:  # 質問文に含まれる単語を辞書に追加
+            question = process_text(question)  # テキストを処理
+            words = question.split(" ")  # 単語に分割
+            for word in words:  # 単語を辞書に追加
                 if word not in self.question2idx:
                     self.question2idx[word] = len(self.question2idx)
-        self.idx2question = {v: k for k, v in self.question2idx.items()}  # 逆変換用の辞書(question)
+        self.idx2question = {v: k for k, v in self.question2idx.items()}  # インデックスを質問文に変換する辞書を作成
 
-        if self.answer:
-            # 回答に含まれる単語を辞書に追加
-            for answers in self.df["answers"]:
+        if self.answer:  # 回答がある場合
+            for answers in self.df["answers"]:  # 回答に含まれる単語を辞書に追加
                 for answer in answers:
                     word = answer["answer"]
                     word = process_text(word)
                     if word not in self.answer2idx:
                         self.answer2idx[word] = len(self.answer2idx)
-            self.idx2answer = {v: k for k, v in self.answer2idx.items()}  # 逆変換用の辞書(answer)
+            self.idx2answer = {v: k for k, v in self.answer2idx.items()}  # インデックスを回答に変換する辞書を作成
 
     def update_dict(self, dataset):
-        """
-        検証用データ，テストデータの辞書を訓練データの辞書に更新する．
-
-        Parameters
-        ----------
-        dataset : Dataset
-            訓練データのDataset
-        """
-        self.question2idx = dataset.question2idx
-        self.answer2idx = dataset.answer2idx
-        self.idx2question = dataset.idx2question
-        self.idx2answer = dataset.idx2answer
+        self.question2idx = dataset.question2idx  # 訓練データセットの質問文の辞書を更新
+        self.answer2idx = dataset.answer2idx  # 訓練データセットの回答の辞書を更新
+        self.idx2question = dataset.idx2question  # 訓練データセットの質問文の逆引き辞書を更新
+        self.idx2answer = dataset.idx2answer  # 訓練データセットの回答の逆引き辞書を更新
 
     def __getitem__(self, idx):
-        """
-        対応するidxのデータ（画像，質問，回答）を取得．
-
-        Parameters
-        ----------
-        idx : int
-            取得するデータのインデックス
-
-        Returns
-        -------
-        image : torch.Tensor  (C, H, W)
-            画像データ
-        question : torch.Tensor  (vocab_size)
-            質問文をone-hot表現に変換したもの
-        answers : torch.Tensor  (n_answer)
-            10人の回答者の回答のid
-        mode_answer_idx : torch.Tensor  (1)
-            10人の回答者の回答の中で最頻値の回答のid
-        """
-        image = Image.open(f"{self.image_dir}/{self.df['image'][idx]}")
-        image = self.transform(image)
-        question = np.zeros(len(self.idx2question) + 1)  # 未知語用の要素を追加
-        question_words = self.df["question"][idx].split(" ")
-        for word in question_words:
+        image = Image.open(f"{self.image_dir}/{self.df['image'][idx]}")  # 画像を読み込む
+        image = self.transform(image)  # 画像を前処理する
+        question = np.zeros(len(self.idx2question) + 1)  # 質問文のone-hotベクトルを初期化
+        question_words = self.df["question"][idx].split(" ")  # 質問文を単語に分割
+        for word in question_words:  # 質問文の単語をone-hotベクトルに変換
             try:
-                question[self.question2idx[word]] = 1  # one-hot表現に変換
+                question[self.question2idx[word]] = 1
             except KeyError:
-                question[-1] = 1  # 未知語
+                question[-1] = 1  # 未知語の場合
 
-        if self.answer:
+        if self.answer:  # 回答がある場合
             answers = [self.answer2idx[process_text(answer["answer"])] for answer in self.df["answers"][idx]]
-            mode_answer_idx = mode(answers)  # 最頻値を取得（正解ラベル）
-
-            return image, torch.Tensor(question), torch.Tensor(answers), int(mode_answer_idx)
-
+            mode_answer_idx = mode(answers)  # 最頻値を取得
+            return image, torch.Tensor(question), torch.Tensor(answers), int(mode_answer_idx)  # 画像、質問、回答、最頻値の回答を返す
         else:
-            return image, torch.Tensor(question)
+            return image, torch.Tensor(question)  # 画像と質問を返す
 
     def __len__(self):
-        return len(self.df)
+        return len(self.df)  # データセットのサイズを返す
 
-
-# 2. 評価指標の実装
-# 簡単にするならBCEを利用する
-def VQA_criterion(batch_pred: torch.Tensor, batch_answers: torch.Tensor):
-    total_acc = 0.
-
-    for pred, answers in zip(batch_pred, batch_answers):
-        acc = 0.
-        for i in range(len(answers)):
-            num_match = 0
-            for j in range(len(answers)):
-                if i == j:
+def VQA_criterion(batch_pred, batch_answers):
+    total_acc = 0.  # 総合正解率を初期化
+    for pred, answers in zip(batch_pred, batch_answers):  # バッチ内の各予測と対応する回答をループ
+        acc = 0.  # 個々の正解率を初期化
+        for i in range(len(answers)):  # 各回答についてループ
+            num_match = 0  # 一致した回答の数を初期化
+            for j in range(len(answers)):  # 他の回答についてループ
+                if i == j:  # 自分自身との比較をスキップ
                     continue
-                if pred == answers[j]:
-                    num_match += 1
-            acc += min(num_match / 3, 1)
-        total_acc += acc / 10
+                if pred == answers[j]:  # 予測と回答が一致した場合
+                    num_match += 1  # 一致数をカウント
+            acc += min(num_match / 3, 1)  # 正解率を計算し、最大値を1とする
+        total_acc += acc / 10  # 正解率の平均を計算し、総合正解率に加算
+    return total_acc / len(batch_pred)  # バッチ内の平均正解率を返す
 
-    return total_acc / len(batch_pred)
-
-
-# 3. モデルのの実装
-# ResNetを利用できるようにしておく
 class BasicBlock(nn.Module):
-    expansion = 1
+    expansion = 1  # 拡張係数を設定（BasicBlockの場合は1）
 
-    def __init__(self, in_channels: int, out_channels: int, stride: int = 1):
+    def __init__(self, in_channels, out_channels, stride=1):
         super().__init__()
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1)  # 最初の畳み込み層
+        self.bn1 = nn.BatchNorm2d(out_channels)  # バッチ正規化層
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1)  # 2番目の畳み込み層
+        self.bn2 = nn.BatchNorm2d(out_channels)  # バッチ正規化層
+        self.relu = nn.ReLU(inplace=True)  # 活性化関数
 
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1)
-        self.bn1 = nn.BatchNorm2d(out_channels)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1)
-        self.bn2 = nn.BatchNorm2d(out_channels)
-        self.relu = nn.ReLU(inplace=True)
-
-        self.shortcut = nn.Sequential()
-        if stride != 1 or in_channels != out_channels:
+        self.shortcut = nn.Sequential()  # ショートカット（恒等写像）
+        if stride != 1 or in_channels != out_channels:  # チャネル数が一致しない場合やストライドが1でない場合
             self.shortcut = nn.Sequential(
-                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride),
-                nn.BatchNorm2d(out_channels)
+                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride),  # 1x1の畳み込み層
+                nn.BatchNorm2d(out_channels)  # バッチ正規化層
             )
 
     def forward(self, x):
-        residual = x
-        out = self.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
-
-        out += self.shortcut(residual)
-        out = self.relu(out)
-
+        residual = x  # 入力を保持
+        out = self.relu(self.bn1(self.conv1(x)))  # 畳み込み->バッチ正規化->ReLU
+        out = self.bn2(self.conv2(out))  # 畳み込み->バッチ正規化
+        out += self.shortcut(residual)  # ショートカットを加算
+        out = self.relu(out)  # ReLUを適用
         return out
-
 
 class BottleneckBlock(nn.Module):
-    expansion = 4
+    expansion = 4  # 拡張係数を設定（BottleneckBlockの場合は4）
 
-    def __init__(self, in_channels: int, out_channels: int, stride: int = 1):
+    def __init__(self, in_channels, out_channels, stride=1):
         super().__init__()
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1)  # 1x1の畳み込み層
+        self.bn1 = nn.BatchNorm2d(out_channels)  # バッチ正規化層
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=stride, padding=1)  # 3x3の畳み込み層
+        self.bn2 = nn.BatchNorm2d(out_channels)  # バッチ正規化層
+        self.conv3 = nn.Conv2d(out_channels, out_channels * self.expansion, kernel_size=1, stride=1)  # 1x1の畳み込み層
+        self.bn3 = nn.BatchNorm2d(out_channels * self.expansion)  # バッチ正規化層
+        self.relu = nn.ReLU(inplace=True)  # 活性化関数
 
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1)
-        self.bn1 = nn.BatchNorm2d(out_channels)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=stride, padding=1)
-        self.bn2 = nn.BatchNorm2d(out_channels)
-        self.conv3 = nn.Conv2d(out_channels, out_channels * self.expansion, kernel_size=1, stride=1)
-        self.bn3 = nn.BatchNorm2d(out_channels * self.expansion)
-        self.relu = nn.ReLU(inplace=True)
-
-        self.shortcut = nn.Sequential()
-        if stride != 1 or in_channels != out_channels * self.expansion:
+        self.shortcut = nn.Sequential()  # ショートカット（恒等写像）
+        if stride != 1 or in_channels != out_channels * self.expansion:  # チャネル数が一致しない場合やストライドが1でない場合
             self.shortcut = nn.Sequential(
-                nn.Conv2d(in_channels, out_channels * self.expansion, kernel_size=1, stride=stride),
-                nn.BatchNorm2d(out_channels * self.expansion)
+                nn.Conv2d(in_channels, out_channels * self.expansion, kernel_size=1, stride=stride),  # 1x1の畳み込み層
+                nn.BatchNorm2d(out_channels * self.expansion)  # バッチ正規化層
             )
 
     def forward(self, x):
-        residual = x
-        out = self.relu(self.bn1(self.conv1(x)))
-        out = self.relu(self.bn2(self.conv2(out)))
-        out = self.bn3(self.conv3(out))
-
-        out += self.shortcut(residual)
-        out = self.relu(out)
-
+        residual = x  # 入力を保持
+        out = self.relu(self.bn1(self.conv1(x)))  # 1x1の畳み込み->バッチ正規化->ReLU
+        out = self.relu(self.bn2(self.conv2(out)))  # 3x3の畳み込み->バッチ正規化->ReLU
+        out = self.bn3(self.conv3(out))  # 1x1の畳み込み->バッチ正規化
+        out += self.shortcut(residual)  # ショートカットを加算
+        out = self.relu(out)  # ReLUを適用
         return out
-
 
 class ResNet(nn.Module):
     def __init__(self, block, layers):
         super().__init__()
-        self.in_channels = 64
+        self.in_channels = 64  # 初期の入力チャネル数を設定
+        self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3)  # 初めの畳み込み層
+        self.bn1 = nn.BatchNorm2d(64)  # バッチ正規化層
+        self.relu = nn.ReLU(inplace=True)  # 活性化関数
+        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)  # プーリング層
 
-        self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3)
-        self.bn1 = nn.BatchNorm2d(64)
-        self.relu = nn.ReLU(inplace=True)
-        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        self.layer1 = self._make_layer(block, layers[0], 64)  # 最初のレイヤー
+        self.layer2 = self._make_layer(block, layers[1], 128, stride=2)  # 2番目のレイヤー
+        self.layer3 = self._make_layer(block, layers[2], 256, stride=2)  # 3番目のレイヤー
+        self.layer4 = self._make_layer(block, layers[3], 512, stride=2)  # 4番目のレイヤー
 
-        self.layer1 = self._make_layer(block, layers[0], 64)
-        self.layer2 = self._make_layer(block, layers[1], 128, stride=2)
-        self.layer3 = self._make_layer(block, layers[2], 256, stride=2)
-        self.layer4 = self._make_layer(block, layers[3], 512, stride=2)
-
-        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Linear(512 * block.expansion, 512)
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))  # 平均プーリング層
+        self.fc = nn.Linear(512 * block.expansion, 512)  # 全結合層
 
     def _make_layer(self, block, blocks, out_channels, stride=1):
-        layers = []
-        layers.append(block(self.in_channels, out_channels, stride))
-        self.in_channels = out_channels * block.expansion
-        for _ in range(1, blocks):
+        layers = [block(self.in_channels, out_channels, stride)]  # 最初のブロックを追加
+        self.in_channels = out_channels * block.expansion  # チャネル数を更新
+        for _ in range(1, blocks):  # 残りのブロックを追加
             layers.append(block(self.in_channels, out_channels))
-
-        return nn.Sequential(*layers)
+        return nn.Sequential(*layers)  # ブロックを順次結合してシーケンスを作成
 
     def forward(self, x):
-        x = self.relu(self.bn1(self.conv1(x)))
-        x = self.maxpool(x)
-
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
-        x = self.layer4(x)
-
-        x = self.avgpool(x)
-        x = x.view(x.size(0), -1)
-        x = self.fc(x)
-
+        x = self.relu(self.bn1(self.conv1(x)))  # 畳み込み->バッチ正規化->ReLU
+        x = self.maxpool(x)  # プーリング
+        x = self.layer1(x)  # 最初のレイヤー
+        x = self.layer2(x)  # 2番目のレイヤー
+        x = self.layer3(x)  # 3番目のレイヤー
+        x = self.layer4(x)  # 4番目のレイヤー
+        x = self.avgpool(x)  # 平均プーリング
+        x = x.view(x.size(0), -1)  # 平坦化
+        x = self.fc(x)  # 全結合層
         return x
 
-
 def ResNet18():
-    return ResNet(BasicBlock, [2, 2, 2, 2])
-
+    return ResNet(BasicBlock, [2, 2, 2, 2])  # ResNet18モデルを作成
 
 def ResNet50():
-    return ResNet(BottleneckBlock, [3, 4, 6, 3])
-
+    return ResNet(BottleneckBlock, [3, 4, 6, 3])  # ResNet50モデルを作成
 
 class VQAModel(nn.Module):
-    def __init__(self, vocab_size: int, n_answer: int):
+    def __init__(self, vocab_size, n_answer):
         super().__init__()
-        self.resnet = ResNet18()
-        self.text_encoder = nn.Linear(vocab_size, 512)
+        self.resnet = ResNet18()  # ResNet18モデルを初期化
+        self.text_encoder = nn.Linear(vocab_size, 512)  # 質問文をエンコードする全結合層
 
-        self.fc = nn.Sequential(
-            nn.Linear(1024, 512),
-            nn.ReLU(inplace=True),
-            nn.Linear(512, n_answer)
+        self.fc = nn.Sequential(  # 最後の全結合層
+            nn.Linear(1024, 512),  # 画像特徴量(512)と質問文特徴量(512)を結合したものを入力
+            nn.BatchNorm1d(512),  # Batch Normalization
+            nn.ReLU(inplace=True),  # 活性化関数ReLU
+            nn.Dropout(0.4),  # Dropout
+            nn.Linear(512, 256),  # 次の全結合層への変換
+            nn.BatchNorm1d(256),  # Batch Normalization
+            nn.ReLU(inplace=True),  # 活性化関数ReLU
+            nn.Dropout(0.4),  # Dropout
+            nn.Linear(256, n_answer)  # 最終的な出力層
         )
 
     def forward(self, image, question):
-        image_feature = self.resnet(image)  # 画像の特徴量
-        question_feature = self.text_encoder(question)  # テキストの特徴量
-
-        x = torch.cat([image_feature, question_feature], dim=1)
-        x = self.fc(x)
-
+        image_feature = self.resnet(image)  # 画像特徴量を抽出（N, 512）
+        question_feature = self.text_encoder(question)  # 質問文の特徴量を抽出（N, 512）
+        x = torch.cat([image_feature, question_feature], dim=1)  # 画像特徴量と質問文特徴量を結合（N, 1024）
+        x = self.fc(x)  # 全結合層を通す（N, n_answer）
         return x
 
-
-# 4. 学習の実装
 def train(model, dataloader, optimizer, criterion, device):
-    model.train()
+    model.train()  # モデルを訓練モードに設定
+    total_loss = 0  # 総損失を初期化
+    total_acc = 0  # 総正解率を初期化
+    simple_acc = 0  # シンプル正解率を初期化
+    start = time.time()  # 訓練の開始時間を記録
 
-    total_loss = 0
-    total_acc = 0
-    simple_acc = 0
+    for image, question, answers, mode_answer in dataloader:  # データローダーからバッチを取得
+        image, question, answers, mode_answer = image.to(device), question.to(device), answers.to(device), mode_answer.to(device)  # デバイスにデータを転送
+        pred = model(image, question)  # モデルにデータを入力して予測を取得
+        loss = criterion(pred, mode_answer.squeeze())  # 損失を計算
 
-    start = time.time()
-    for image, question, answers, mode_answer in dataloader:
-        image, question, answer, mode_answer = \
-            image.to(device), question.to(device), answers.to(device), mode_answer.to(device)
+        optimizer.zero_grad()  # 勾配をゼロにリセット
+        loss.backward()  # 誤差逆伝播を実行
+        optimizer.step()  # パラメータを更新
 
-        pred = model(image, question)
-        loss = criterion(pred, mode_answer.squeeze())
+        total_loss += loss.item()  # 総損失を更新
+        total_acc += VQA_criterion(pred.argmax(1), answers)  # 総正解率を更新
+        simple_acc += (pred.argmax(1) == mode_answer).float().mean().item()  # シンプル正解率を更新
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        total_loss += loss.item()
-        total_acc += VQA_criterion(pred.argmax(1), answers)  # VQA accuracy
-        simple_acc += (pred.argmax(1) == mode_answer).float().mean().item()  # simple accuracy
-
-    return total_loss / len(dataloader), total_acc / len(dataloader), simple_acc / len(dataloader), time.time() - start
-
+    return total_loss / len(dataloader), total_acc / len(dataloader), simple_acc / len(dataloader), time.time() - start  # 平均損失、正解率、シンプル正解率、訓練時間を返す
 
 def eval(model, dataloader, optimizer, criterion, device):
-    model.eval()
+    model.eval()  # モデルを評価モードに設定
+    total_loss = 0  # 総損失を初期化
+    total_acc = 0  # 総正解率を初期化
+    simple_acc = 0  # シンプル正解率を初期化
+    start = time.time()  # 評価の開始時間を記録
 
-    total_loss = 0
-    total_acc = 0
-    simple_acc = 0
+    with torch.no_grad():  # 評価中は勾配を計算しない
+        for image, question, answers, mode_answer in dataloader:  # データローダーからバッチを取得
+            image, question, answers, mode_answer = image.to(device), question.to(device), answers.to(device), mode_answer.to(device)  # デバイスにデータを転送
+            pred = model(image, question)  # モデルにデータを入力して予測を取得
+            loss = criterion(pred, mode_answer.squeeze())  # 損失を計算
 
-    start = time.time()
-    for image, question, answers, mode_answer in dataloader:
-        image, question, answer, mode_answer = \
-            image.to(device), question.to(device), answers.to(device), mode_answer.to(device)
+            total_loss += loss.item()  # 総損失を更新
+            total_acc += VQA_criterion(pred.argmax(1), answers)  # 総正解率を更新
+            simple_acc += (pred.argmax(1) == mode_answer).mean().item()  # シンプル正解率を更新
 
-        pred = model(image, question)
-        loss = criterion(pred, mode_answer.squeeze())
+    return total_loss / len(dataloader), total_acc / len(dataloader), simple_acc / len(dataloader), time.time() - start  # 平均損失、正解率、シンプル正解率、評価時間を返す
 
-        total_loss += loss.item()
-        total_acc += VQA_criterion(pred.argmax(1), answers)  # VQA accuracy
-        simple_acc += (pred.argmax(1) == mode_answer).mean().item()  # simple accuracy
+# データセットのパスやその他の設定
+train_json_path = "./data/train.json"  # 訓練データのJSONファイルのパス
+valid_json_path = "./data/valid.json"  # 検証データのJSONファイルのパス
+train_image_dir = "./data/train"  # 訓練画像のディレクトリパス
+valid_image_dir = "./data/valid"  # 検証画像のディレクトリパス
+model_path = "model.pth"  # モデルパラメータを保存するファイルのパス
+submission_path = "submission.npy"  # 提出用の予測結果を保存するファイルのパス
+num_epoch = 20 # エポック数
+batch_size = 128  # バッチサイズ
+learning_rate = 0.001  # 学習率
+weight_decay = 1e-5  # 重み減衰（L2正則化）
+seed = 42  # ランダムシード
 
-    return total_loss / len(dataloader), total_acc / len(dataloader), simple_acc / len(dataloader), time.time() - start
+set_seed(seed)  # ランダムシードを設定
+device = "cuda" if torch.cuda.is_available() else "cpu"  # 使用するデバイスを設定
 
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),  # 画像を224x224にリサイズ
+    transforms.RandomHorizontalFlip(),  # 水平方向にランダムに反転
+    transforms.RandomRotation(10),  # ランダムに回転 (±10度)
+    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),  # カラージッター
+    transforms.ToTensor(),  # 画像をテンソルに変換
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # ノーマライゼーション
+])
 
-def main():
-    # deviceの設定
-    set_seed(42)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+train_dataset = VQADataset(df_path=train_json_path, image_dir=train_image_dir, transform=transform)  # 訓練データセットを作成
+test_dataset = VQADataset(df_path=valid_json_path, image_dir=valid_image_dir, transform=transform, answer=False)  # 検証データセットを作成
+test_dataset.update_dict(train_dataset)  # 検証データセットの辞書を訓練データセットに合わせて更新
 
-    # dataloader / model
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor()
-    ])
-    train_dataset = VQADataset(df_path="./data/train.json", image_dir="./data/train", transform=transform)
-    test_dataset = VQADataset(df_path="./data/valid.json", image_dir="./data/valid", transform=transform, answer=False)
-    test_dataset.update_dict(train_dataset)
+train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)  # 訓練データローダーを作成
+test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=1, shuffle=False)  # 検証データローダーを作成
 
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=128, shuffle=True)
-    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=1, shuffle=False)
+model = VQAModel(vocab_size=len(train_dataset.question2idx)+1, n_answer=len(train_dataset.answer2idx)).to(device)  # モデルを初期化
+criterion = nn.CrossEntropyLoss()  # 損失関数を設定
+optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)  # オプティマイザを設定
 
-    model = VQAModel(vocab_size=len(train_dataset.question2idx)+1, n_answer=len(train_dataset.answer2idx)).to(device)
+for epoch in range(num_epoch):  # エポック数だけループ
+    train_loss, train_acc, train_simple_acc, train_time = train(model, train_loader, optimizer, criterion, device)  # 訓練を実行し、損失、正解率、シンプル正解率、訓練時間を取得
+    print(f"【{epoch + 1}/{num_epoch}】\n"  # 現在のエポック数を表示
+          f"train time: {train_time:.2f} [s]\n"  # 訓練時間を表示
+          f"train loss: {train_loss:.4f}\n"  # 訓練損失を表示
+          f"train acc: {train_acc:.4f}\n"  # 訓練正解率を表示
+          f"train simple acc: {train_simple_acc:.4f}")  # シンプル正解率を表示
 
-    # optimizer / criterion
-    num_epoch = 20
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
+model.eval()  # モデルを評価モードに設定
+submission = []  # 提出用の予測結果を保存するリストを初期化
 
-    # train model
-    for epoch in range(num_epoch):
-        train_loss, train_acc, train_simple_acc, train_time = train(model, train_loader, optimizer, criterion, device)
-        print(f"【{epoch + 1}/{num_epoch}】\n"
-              f"train time: {train_time:.2f} [s]\n"
-              f"train loss: {train_loss:.4f}\n"
-              f"train acc: {train_acc:.4f}\n"
-              f"train simple acc: {train_simple_acc:.4f}")
+for image, question in test_loader:  # テストデータローダーからバッチを取得してループ
+    image, question = image.to(device), question.to(device)  # デバイスにデータを転送
+    pred = model(image, question)  # モデルにデータを入力して予測を取得
+    pred = pred.argmax(1).cpu().item()  # 予測をクラスラベルに変換し、CPUに転送して数値に変換
+    submission.append(pred)  # 予測結果をリストに追加
 
-    # 提出用ファイルの作成
-    model.eval()
-    submission = []
-    for image, question in test_loader:
-        image, question = image.to(device), question.to(device)
-        pred = model(image, question)
-        pred = pred.argmax(1).cpu().item()
-        submission.append(pred)
-
-    submission = [train_dataset.idx2answer[id] for id in submission]
-    submission = np.array(submission)
-    torch.save(model.state_dict(), "model.pth")
-    np.save("submission.npy", submission)
-
-if __name__ == "__main__":
-    main()
+submission = [train_dataset.idx2answer[id] for id in submission]  # 予測結果のIDを回答テキストに変換
+submission = np.array(submission)  # 予測結果をNumPy配列に変換
+torch.save(model.state_dict(), model_path)  # モデルのパラメータをファイルに保存
+np.save(submission_path, submission)  # 予測結果をファイルに保存
